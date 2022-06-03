@@ -161,15 +161,13 @@ class TextState(State):
 class ValueLogger:
     def __init__(self, valueNames: list, struct_dict):
         self.valueUuids = dict()
-        self.newData = False
-        
         #find UUIDs of values of interest
         for valueName in valueNames:
             found = False
             for uuid in struct_dict['controls']:
                 if struct_dict['controls'][uuid]['name'] == valueName:
                     found = True
-                    self.valueUuids[uuid] = [valueName,0]
+                    self.valueUuids[uuid] = [valueName,0, False]
             if not found:
                 logger.error("UUID for {} not found".format(valueName))
     
@@ -179,22 +177,45 @@ class ValueLogger:
             print("{}: {}".format(self.valueUuids[uuid][0], self.valueUuids[uuid][1]))
         print("-------------------------------------------------")
     
-    def getData(self):
+    def getDataWithNames(self, changedOnly = False):
         ret = dict()
         for uuid in self.valueUuids:
-            ret[self.valueUuids[uuid][0]] = self.valueUuids[uuid][1]
+            if not changedOnly or self.valueUuids[uuid][2]:
+                ret[self.valueUuids[uuid][0]] = self.valueUuids[uuid][1]
+        return ret
+    
+    def getDataWithUuids(self, changedOnly = False):
+        ret = dict()
+        for uuid in self.valueUuids:
+            if not changedOnly or self.valueUuids[uuid][2]:
+                ret[uuid] = self.valueUuids[uuid][1]
         return ret
             
     def setValue(self, setUuid, setVal):
         for uuid in self.valueUuids:
             if uuid == setUuid:
+                if setVal != self.valueUuids[uuid][1]:
+                    self.valueUuids[uuid][2] = True #Mark data as changed
                 self.valueUuids[uuid][1] = setVal
-                self.newData = True
+                return True
+        return False
+    
+    def setValueByName(self, setName, setVal:float):
+        for uuid in self.valueUuids:
+            if self.valueUuids[uuid][0] == setName:
+                if setVal != self.valueUuids[uuid][1]:
+                    self.valueUuids[uuid][2] = True #Mark data as changed
+                self.valueUuids[uuid][1] = setVal
                 return True
         return False
     
     def hasNewData(self):
-        return self.newData
+        newData = False
+        for uuid in self.valueUuids:
+            newData = newData or self.valueUuids[uuid][2]
+        return newData
     
     def flushData(self):
-        self.newData = False
+        for uuid in self.valueUuids:
+            self.valueUuids[uuid][2] = False
+            

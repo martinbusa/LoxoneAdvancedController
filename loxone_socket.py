@@ -25,6 +25,7 @@ import websockets #lib for websockets
 import asyncio    #Asynchronous operation is necessary to deal with websockets
 import signal
 import time
+import sys, getopt
 import logging
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ from nested_lookup import nested_lookup # install nested-lookup --> great for th
 from home_libs import loxone as lox
 from home_libs import influxConnector as influx
 from home_libs import weatherservice as ws
+from home_libs import loxcontroller as loxCtrl
 
 #Some Configuration/Definition --> Edit as needed
 
@@ -94,29 +96,88 @@ rsa_pub_key = None #possibility to set the key for debugging, e.g. "-----BEGIN P
 DB_REFRESH_TIME = 30
 
 #How oftern should weather data be refreshed [s]
-DATA_REFRESH_TIME=300
+WEATHER_DATA_REFRESH_TIME=300
+
+#How often should values be written to Loxone [s]
+LOXONE_WRITE_TIME=30
+
+#How often is the controller refreshed [s]
+CONTROLLER_REFRESH_RATE=30
 
 #Add names of values/controls to log
 # Check your loxip/data/LoxAPP3.json to get the names
-logValueNames = ['Z2.1Pos','Z2.2Pos','Z3.1Pos','Z3.2Pos','Z4Pos',
-                 'ST1', 'ST1.2',
-                 'ST2.1', 'ST2T', 'ST2.3',
-                 'ST3','ST3T','ST3.2',
-                 'ST4','ST4T',
-                 'R2-AcMod', 'R2-Cooling', 'R2-Heating', 'R2-Vent',
-                 'R3-AcMod', 'R3-Cooling', 'R3-Heating', 'R3-Vent',
-                 'R4-AcMod', 'R4-Cooling', 'R4-Heating', 'R4-Vent']
+# Each it in list consist of:
+#   Value name to log
+#   Whether the value should be writen with default value at end of script
+#   Default value
+logValueNames = [['Z2.1Pos', False, 0], ['Z2.2Pos', False, 0],
+                 ['Z3.1Pos', False, 0], ['Z3.2Pos', False, 0],
+                 ['Z4Pos', False, 0],
+                 ['ST1', False, 0], ['ST1.2', False, 0],
+                 ['ST2.1', False, 0], ['ST2T', False, 0], ['ST2.3', False, 0],
+                 ['ST3', False, 0], ['ST3T', False, 0], ['ST3.2', False, 0],
+                 ['ST4', False, 0], ['ST4T', False, 0],
+                 ['R2-AcMod', True, 0], ['R2-Cooling', True, 0],
+                 ['R2-Heating', True, 0], ['R2-Vent', True, 0],
+                 ['R3-AcMod', True, 0], ['R3-Cooling', True, 0],
+                 ['R3-Heating', True, 0], ['R3-Vent', True, 0],
+                 ['R4-AcMod', True, 0], ['R4-Cooling', True, 0],
+                 ['R4-Heating', True, 0], ['R4-Vent', True, 0],
+                 ['U1PresentMem', True, 0], ['U2PresentMem', True, 0],
+                 ['R3-CurAuto', True, 0], ['R4-CurAuto', True, 0],
+                 ['SunShining', True, 0]]
 
+ctrlValueNames = [['Z2.1ReqPosAuto', False, 0], ['Z2.2ReqPosAuto', False, 0],
+                 ['Z3.1ReqPosAuto', False, 0], ['Z3.2ReqPosAuto', False, 0],
+                 ['Z4ReqPosAuto', False, 0]]
 
-
+#Global variables
 running = True
+writeToDb = True
+writeToLox = True
+logLevel = logging.INFO
+
+
 def sigusrHandler(signalNumber, frame):
     logger.info("End requested")
     global running
     running = False
 
+def parseCmdArgs():
+    global logLevel
+    global writeToDb
+    global writeToLox
+    
+    try:
+        opts, args = getopt.getopt(sys.argv[1:],"hl:w:s:",["loglvl=","writedb=","setlox="])
+    except getopt.GetoptError:
+        print ('loxone_socket.py -l <logLevel> -w <writeDb> -s <writeToLoxone>')
+        sys.exit(2)
+    for opt, arg in opts:
+        if opt == '-h':
+            print('loxone_socket.py -l <logLevel> -w <writeDb> -s <writeToLoxone>')
+            sys.exit()
+        elif opt in ("-l", "--loglvl"):
+            if arg == '0':
+                logLevel = logging.ERROR
+            elif arg == '1':
+                logLevel = logging.INFO
+            elif arg == '2':
+                logLevel = logging.DEBUG
+        elif opt in ("-w", "--writedb"):
+            if arg == '1':
+                writeToDb = True
+            else:
+                writeToDb = False
+        elif opt in ("-s", "--setlox"):
+            if arg == '1':
+                writeToLox = True
+            else:
+                writeToLox = False
+
 #Websocket connection to Loxone
 async def webSocketLx():
+    global testCommand
     #Encrypt the AES Key and IV with RSA (page 7, step 6)
     sessionkey = await create_sessionkey(aes_key, aes_iv)
     logger.debug("Session key: {}".format(sessionkey)) 
@@ -161,23 +222,59 @@ async def webSocketLx():
         structure_file = await myWs.recv()
         struct_dict = json.loads(structure_file)
         logger.debug("Structure File: {}".format(json.dumps(structure_file)))
-        valueStore = lox.ValueLogger(logValueNames, struct_dict)
-        weather = ws.WeatherService(myLat, myLon, myWeatherApiKey, DATA_REFRESH_TIME)
+        valueStore = lox.ValueLogger([it[0] for it in logValueNames], struct_dict)
+        ctrlValStore = lox.ValueLogger([it[0] for it in ctrlValueNames], struct_dict)
+        weather = ws.WeatherService(myLat, myLon, myWeatherApiKey, WEATHER_DATA_REFRESH_TIME)
         influxConnector = influx.Connector(myInfluxIp, myInfluxPort, myInfluxDbName, "values")
+        myController = loxCtrl.Controller()
         
         await myWs.send("jdev/sps/enablebinstatusupdate")
         start = time.time()
+        ctrlStart = time.time()
+        writeStart = time.time()
         while running:
+            #Writing data to DB
             if valueStore.hasNewData() and (time.time() - start) >= DB_REFRESH_TIME:
-                #Logger has new data and at least 30 seconds has passed
+                #Logger has new data and DB_REFRESH_TIME has passed
                 valueStore.printData()
-                loxoneData = valueStore.getData()
+                loxoneData = valueStore.getDataWithNames()
                 valueStore.flushData()
+                if writeToDb:
+                    weatherData = weather.getData()
+                    loxoneData.update(weatherData)
+                    influxConnector.submitData(loxoneData)
+                start = time.time()
+                
+            #Refresh the controller
+            if (time.time() - ctrlStart) >= CONTROLLER_REFRESH_RATE:
+                ctrlStart = time.time()
+                #Create data for controller
+                loxoneData = valueStore.getDataWithNames()
                 weatherData = weather.getData()
                 loxoneData.update(weatherData)
-                influxConnector.submitData(loxoneData)
+                ctrlData = myController.update(loxoneData)
+                for item in ctrlData:
+                    ctrlValStore.setValueByName(item, ctrlData[item])
                 
-                start = time.time()
+            #Writing data to Loxone
+            if ctrlValStore.hasNewData() and (time.time() - writeStart) >= LOXONE_WRITE_TIME:
+                #Time to write new data to Loxone
+                ctrlValStore.printData()
+                writeData = ctrlValStore.getDataWithUuids(changedOnly=True)
+                ctrlValStore.flushData()
+                if writeToLox:
+                    #send commands to Loxone
+                    for cmd in writeData:
+                        print("Sending data {}".format(cmd))
+                        setDataCommand = "jdev/sps/io/{}/{}".format(cmd, writeData[cmd])
+                        print("Send command: {}".format(setDataCommand))
+                        #Send message
+                        await myWs.send(setDataCommand)
+                        await myWs.recv()
+                        print("Answer to the command: {}".format(await myWs.recv()))
+                writeStart = time.time()    
+        
+            #Parse incomming messages
             header = lox.Header(await myWs.recv())
             message = await myWs.recv()
             if header.msg_type == 'text':
@@ -188,20 +285,22 @@ async def webSocketLx():
                 statesDict = lox.ValueState.parseTable(message)
                 for uuid in statesDict:
                     valueStore.setValue(uuid, statesDict[uuid])
-                    nameLookup = nested_lookup(uuid, struct_dict, with_keys = True)
-                    name = 'Unknown'
-                    if uuid in nameLookup:
-                      name = nameLookup[uuid][0]['name']
-                    logger.debug("Value {}({}): {}".format(name,uuid, statesDict[uuid]))
+                    if logger.isEnabledFor(logging.DEBUG):
+                        nameLookup = nested_lookup(uuid, struct_dict, with_keys = True)
+                        name = 'Unknown'
+                        if uuid in nameLookup:
+                          name = nameLookup[uuid][0]['name']
+                        logger.debug("Value {}({}): {}".format(name,uuid, statesDict[uuid]))
             elif header.msg_type == 'text_event':
-                textsDict = lox.TextState.parseTable(message)
-                logger.debug(textsDict)
-                for uuid in textsDict:
-                  nameLookup = nested_lookup(uuid, struct_dict, with_keys = True)
-                  name = 'Unknown'
-                  if uuid in nameLookup:
-                    name = nameLookup[uuid][0]['name']
-                  logger.debug("Text {}({}): {}".format(name,uuid, textsDict[uuid]))
+                if logger.isEnabledFor(logging.DEBUG):
+                    textsDict = lox.TextState.parseTable(message)
+                    logger.debug(textsDict)
+                    for uuid in textsDict:
+                        nameLookup = nested_lookup(uuid, struct_dict, with_keys = True)
+                        name = 'Unknown'
+                        if uuid in nameLookup:
+                            name = nameLookup[uuid][0]['name']
+                        logger.debug("Text {}({}): {}".format(name,uuid, textsDict[uuid]))
             elif header.msg_type == 'daytimer':
                 logger.debug("Daytimer message: {}".format(message))
             elif header.msg_type == 'out-of-service':
@@ -212,7 +311,19 @@ async def webSocketLx():
                 logger.debug("Weather message: {}".format(message))
             else:
                 logger.error("Unknown message: {}".format(message))
-        
+        #Script is ending, write default values to db
+        if writeToDb:
+            for item in logValueNames:
+                if item[1]:
+                    valueStore.setValueByName(item[0], item[2])
+            if valueStore.hasNewData():
+                loxoneData = valueStore.getDataWithNames()
+                valueStore.flushData()
+                weatherData = weather.getData()
+                loxoneData.update(weatherData)
+                influxConnector.submitData(loxoneData)
+
+
 # Function to RSA encrypt the AES key and iv
 async def create_sessionkey(aes_key, aes_iv):
     payload = aes_key + ":" + aes_iv
@@ -289,10 +400,12 @@ async def digest_hmac_sha1(message, key):
 Log_Format = "%(levelname)s %(asctime)s - %(message)s"
 
 if __name__ == '__main__':
+    parseCmdArgs()
+    print("Starting script: LogLevel: {} WriteToDb: {} WriteToLoxone: {}".format(logLevel, writeToDb, writeToLox))
     logging.basicConfig(filename = "logfile.log",
                     filemode = "w",
                     format = Log_Format, 
-                    level = logging.INFO)
+                    level = logLevel)
     if hasattr(signal, 'SIGUSR1'):
         signal.signal(signal.SIGUSR1, sigusrHandler)
     rsa_pub_key = lox.prepareRsaKey(myIP, myPort) #Retrieve the public RSA key of the miniserver (page 7, step 2)
