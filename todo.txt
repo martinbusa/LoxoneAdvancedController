@@ -1,0 +1,6 @@
+- Reconnect socket if connection breaks down
+- Add keepalive messages
+- Log possibility to log default values to Influx when ending script
+- Search name using nested_lookup only when logging is set to DEBUG
+- Move most of code from main script to separate module
+- Send control data to Loxone
