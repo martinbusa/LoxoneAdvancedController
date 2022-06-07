@@ -1,3 +1,1 @@
-- Reconnect socket if connection breaks down
-- Add keepalive messages
 - Move most of code from main script to separate module

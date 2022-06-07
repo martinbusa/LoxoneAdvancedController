@@ -30,6 +30,7 @@ class Header:
             raise ValueError("This is not a header message")
         self.msg_type = self.__setIdentifier(header_msg[1:2])
         self.exact2Follow = self.__setExact2Follow(header_msg[2:3])
+        self.msg_len = self.__setLength(header_msg[4:8])
         #Bytes 4-8 could be decoded some other time --> would allow prediction of load times
         
         
@@ -53,6 +54,12 @@ class Header:
             return True
         else:
             return False
+        
+    def __setLength(self, fifthByte: bytes):
+        bitstream = ConstBitStream(fifthByte)
+        bitstream.pos = 0
+        return bitstream.unpack('uintle:32')[0]
+        
 
 # Base Class for State Messages
 class State:
@@ -191,7 +198,7 @@ class ValueLogger:
                 ret[uuid] = self.valueUuids[uuid][1]
         return ret
             
-    def setValue(self, setUuid, setVal):
+    def setValue(self, setUuid, setVal: float):
         for uuid in self.valueUuids:
             if uuid == setUuid:
                 if setVal != self.valueUuids[uuid][1]:
