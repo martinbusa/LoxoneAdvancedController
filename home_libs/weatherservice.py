@@ -37,39 +37,43 @@ class WeatherService:
         
     def fetchData(self):
         self.fetchTime = time.time()
-        response = requests.get(
-            "https://api.openweathermap.org/data/2.5/weather?lat={}&lon={}&appid={}&units=metric"
-            .format(self.lat,self.lon,self.apiKey))
-        if response.status_code != 200:
-            logger.error("Error while reading weather data, response status: {}".format(response.status_code))
-        responseJson = response.json()
-        if not responseJson:
-            logger.error("Error while reading weather data, no JSON in response")
-            return { "status": -1}
-        #basic weather info
-        if 'weather' in responseJson:  
-            self.weatherId=responseJson['weather'][len(responseJson['weather'])-1]['id'] 
-            self.weatherString=responseJson['weather'][len(responseJson['weather'])-1]['main']
-        #atmospherical info
-        if 'main' in responseJson:    
-            self.temp=responseJson['main']['temp']
-            self.tempFeel=responseJson['main']['feels_like']
-            self.pressure=responseJson['main']['pressure']
-            self.humidity=responseJson['main']['humidity']
-        #wind info
-        if 'wind' in responseJson:
-            self.windSpeed=responseJson['wind']['speed']
-            self.windDir=responseJson['wind']['deg']
-        #clouds info
-        if 'clouds' in responseJson:
-            self.clouds=responseJson['clouds']['all']
-        #rain
-        if 'rain' in responseJson:
-            self.rain1h=responseJson['rain']['1h']
-        #snow
-        if 'snow' in responseJson:
-            self.snow1h=responseJson['snow']['1h']
-        if 'dt' in responseJson:
-            self.dataTimeLin=responseJson['dt']
-        logger.debug("WeatherService: Fetched new data")
+        try:
+            response = requests.get(
+                "https://api.openweathermap.org/data/2.5/weather?lat={}&lon={}&appid={}&units=metric"
+                .format(self.lat,self.lon,self.apiKey))
+        except ConnectionError as e:
+            logger.error("Error while reading weather data (Connection Error): {}".format(e))
+        else:
+            if response.status_code != 200:
+                logger.error("Error while reading weather data, response status: {}".format(response.status_code))
+            responseJson = response.json()
+            if not responseJson:
+                logger.error("Error while reading weather data, no JSON in response")
+                return { "status": -1}
+            #basic weather info
+            if 'weather' in responseJson:  
+                self.weatherId=responseJson['weather'][len(responseJson['weather'])-1]['id'] 
+                self.weatherString=responseJson['weather'][len(responseJson['weather'])-1]['main']
+            #atmospherical info
+            if 'main' in responseJson:    
+                self.temp=responseJson['main']['temp']
+                self.tempFeel=responseJson['main']['feels_like']
+                self.pressure=responseJson['main']['pressure']
+                self.humidity=responseJson['main']['humidity']
+            #wind info
+            if 'wind' in responseJson:
+                self.windSpeed=responseJson['wind']['speed']
+                self.windDir=responseJson['wind']['deg']
+            #clouds info
+            if 'clouds' in responseJson:
+                self.clouds=responseJson['clouds']['all']
+            #rain
+            if 'rain' in responseJson:
+                self.rain1h=responseJson['rain']['1h']
+            #snow
+            if 'snow' in responseJson:
+                self.snow1h=responseJson['snow']['1h']
+            if 'dt' in responseJson:
+                self.dataTimeLin=responseJson['dt']
+            logger.debug("WeatherService: Fetched new data")
             

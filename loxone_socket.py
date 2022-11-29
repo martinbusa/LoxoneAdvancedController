@@ -107,6 +107,9 @@ CONTROLLER_REFRESH_RATE=30
 #How often a keepalive message is sent [s]
 KEEP_ALIVE_REFRESH_TIME = 120
 
+#How often is the ping value changed [s]
+LOXONE_PING_VALUE_CHANGE=60
+
 #Add names of values/controls to log
 # Check your loxip/data/LoxAPP3.json to get the names
 # Each it in list consist of:
@@ -139,7 +142,7 @@ ctrlValueNames = [['Z2.1ReqPosAutoSet', False, 0], ['Z2.2ReqPosAutoSet', False, 
                  ['CloudsSet', False, 0], ['HumiditySet', False, 0], ['PressureSet', False, 0],
                  ['RainSet', False, 0], ['SnowSet', False, 0], ['TempSet', False, 0],
                  ['TempFeelSet', False, 0],['WeatherIdSet', False, 0],['WindDirSet', False, 0],
-                 ['WindSpeedSet', False, 0]]
+                 ['WindSpeedSet', False, 0], ['LoxCtrlPing', False, 0]]
 
 weatherDataToLoxDict = {'clouds': 'CloudsSet', 'humid': 'HumiditySet', 'press': 'PressureSet',
                         'rain': 'RainSet', 'snow': 'SnowSet', 'temp': 'TempSet',
@@ -198,166 +201,179 @@ async def webSocketLx():
     logger.debug("Session key: {}".format(sessionkey))
     firstRun = True
     
-    #start websocket connection (page 7, step 3 - protocol does not need to be specified apparently)
-    async with websockets.connect("ws://{}:{}/ws/rfc6455".format(myIP, myPort)) as myWs:
-        try:
-            #Send Session Key (page 8, step 7)
-            await myWs.send("jdev/sys/keyexchange/{}".format(sessionkey))
-            await myWs.recv()
-            response = await myWs.recv()
-            sessionkey_answer = json.loads(response)["LL"]["value"]
-            
-            #Now a ramdom salt of 2 bytes is added (page 8, step 8)
-            aes_salt = binascii.hexlify(secrets.token_bytes(2)).decode()
-            
-            #Now prepare the token collection command with command encryption
-            #Objective is to: Request a JSON Web Token “jdev/sys/getjwt/{hash}/{user}/{permission}/{uuid}/{info}”
-            #--> This request must be encrypted
-            # page 8, step 9b
-            
-            #Sending encrypted commands over the websocket (page 27, step 1)
-            # Get the JSON web token (page 22, 23)
-            getTokenCommand = "salt/{}/jdev/sys/getjwt/{}/{}/{}/{}/{}".format(aes_salt, await hashUserPw(myUser, myPassword), myUser, myPermission, myUUID, myIdentifier)
-            logger.debug("Get Token Command to be encrypted: {}".format(getTokenCommand))
-            
-            #Now encrypt the command with AES (page 21 step 1 & 2)
-            encrypted_command = await aes_enc(getTokenCommand, aes_key, aes_iv)
-            message_to_ws = "jdev/sys/enc/{}".format(encrypted_command) # page 21, step 3
-            logger.debug("Message to be sent: {}".format(message_to_ws))
-            
-            #Send message to get a JSON webtoken
-            await myWs.send(message_to_ws)
-            await myWs.recv()
-            logger.debug("Answer to the Token-Command: {}".format(await myWs.recv())) #And if you get back a 200 the connection is established
-            
-            #Get the structure file from the Miniserver (page 18)
-            await myWs.send("data/LoxAPP3.json")
-            header = lox.Header(await myWs.recv())
-            logger.debug(header.msg_type)
-            logger.debug(await myWs.recv())
-            structure_file = await myWs.recv()
-            struct_dict = json.loads(structure_file)
-            logger.debug("Structure File: {}".format(json.dumps(structure_file)))
-            valueStore = lox.ValueLogger([it[0] for it in logValueNames], struct_dict)
-            ctrlValStore = lox.ValueLogger([it[0] for it in ctrlValueNames], struct_dict)
-            weather = ws.WeatherService(myLat, myLon, myWeatherApiKey, WEATHER_DATA_REFRESH_TIME)
-            influxConnector = influx.Connector(myInfluxIp, myInfluxPort, myInfluxDbName, "values")
-            myController = loxCtrl.Controller()
-            
-            await myWs.send("jdev/sps/enablebinstatusupdate")
-            start = time.time()
-            ctrlStart = time.time()
-            writeStart = time.time()
-            keepAliveStart = time.time()
-            while running:
-                #Parse incomming messages
+    try:
+        #start websocket connection (page 7, step 3 - protocol does not need to be specified apparently)
+        async with websockets.connect("ws://{}:{}/ws/rfc6455".format(myIP, myPort)) as myWs:
+            try:
+                #Send Session Key (page 8, step 7)
+                await myWs.send("jdev/sys/keyexchange/{}".format(sessionkey))
+                await myWs.recv()
+                response = await myWs.recv()
+                sessionkey_answer = json.loads(response)["LL"]["value"]
+                
+                #Now a ramdom salt of 2 bytes is added (page 8, step 8)
+                aes_salt = binascii.hexlify(secrets.token_bytes(2)).decode()
+                
+                #Now prepare the token collection command with command encryption
+                #Objective is to: Request a JSON Web Token “jdev/sys/getjwt/{hash}/{user}/{permission}/{uuid}/{info}”
+                #--> This request must be encrypted
+                # page 8, step 9b
+                
+                #Sending encrypted commands over the websocket (page 27, step 1)
+                # Get the JSON web token (page 22, 23)
+                getTokenCommand = "salt/{}/jdev/sys/getjwt/{}/{}/{}/{}/{}".format(aes_salt, await hashUserPw(myUser, myPassword), myUser, myPermission, myUUID, myIdentifier)
+                logger.debug("Get Token Command to be encrypted: {}".format(getTokenCommand))
+                
+                #Now encrypt the command with AES (page 21 step 1 & 2)
+                encrypted_command = await aes_enc(getTokenCommand, aes_key, aes_iv)
+                message_to_ws = "jdev/sys/enc/{}".format(encrypted_command) # page 21, step 3
+                logger.debug("Message to be sent: {}".format(message_to_ws))
+                
+                #Send message to get a JSON webtoken
+                await myWs.send(message_to_ws)
+                await myWs.recv()
+                logger.debug("Answer to the Token-Command: {}".format(await myWs.recv())) #And if you get back a 200 the connection is established
+                
+                #Get the structure file from the Miniserver (page 18)
+                await myWs.send("data/LoxAPP3.json")
                 header = lox.Header(await myWs.recv())
-                logger.debug("Msg len {}".format(header.msg_len))
-                if header.msg_len > 0:
-                    message = await myWs.recv()
-                if header.msg_type == 'text':
-                    logger.debug("Text message: {}".format(message))
-                elif header.msg_type == 'bin':
-                    logger.debug("Binary message: {}".format(message))
-                elif header.msg_type == 'value':
-                    statesDict = lox.ValueState.parseTable(message)
-                    for uuid in statesDict:
-                        valueStore.setValue(uuid, float(statesDict[uuid]))
-                        if logger.isEnabledFor(logging.DEBUG):
-                            nameLookup = nested_lookup(uuid, struct_dict, with_keys = True)
-                            name = 'Unknown'
-                            if uuid in nameLookup:
-                              name = nameLookup[uuid][0]['name']
-                            logger.debug("Value {}({}): {}".format(name,uuid, statesDict[uuid]))
-                elif header.msg_type == 'text_event':
-                    if logger.isEnabledFor(logging.DEBUG):
-                        textsDict = lox.TextState.parseTable(message)
-                        logger.debug(textsDict)
-                        for uuid in textsDict:
-                            nameLookup = nested_lookup(uuid, struct_dict, with_keys = True)
-                            name = 'Unknown'
-                            if uuid in nameLookup:
-                                name = nameLookup[uuid][0]['name']
-                            logger.debug("Text {}({}): {}".format(name,uuid, textsDict[uuid]))
-                elif header.msg_type == 'daytimer':
-                    logger.debug("Daytimer message: {}".format(message))
-                elif header.msg_type == 'out-of-service':
-                    logger.debug("Out-of-service message: {}".format(message))
-                elif header.msg_type == 'still_alive':
-                    logger.debug("Still alive message")
-                elif header.msg_type == 'weather':
-                    logger.debug("Weather message: {}".format(message))
-                else:
-                    logger.error("Unknown message: {}".format(message))
-                    
-                #Writing data to DB
-                if valueStore.hasNewData() and (time.time() - start) >= DB_REFRESH_TIME:
-                    #Logger has new data and DB_REFRESH_TIME has passed
-                    #valueStore.printData()
-                    loxoneData = valueStore.getDataWithNames()
-                    valueStore.flushData()
-                    if writeToDb:
+                logger.debug(header.msg_type)
+                logger.debug(await myWs.recv())
+                structure_file = await myWs.recv()
+                struct_dict = json.loads(structure_file)
+                logger.debug("Structure File: {}".format(json.dumps(structure_file)))
+                valueStore = lox.ValueLogger([it[0] for it in logValueNames], struct_dict)
+                ctrlValStore = lox.ValueLogger([it[0] for it in ctrlValueNames], struct_dict)
+                weather = ws.WeatherService(myLat, myLon, myWeatherApiKey, WEATHER_DATA_REFRESH_TIME)
+                influxConnector = influx.Connector(myInfluxIp, myInfluxPort, myInfluxDbName, "values")
+                myController = loxCtrl.Controller()
+                
+                await myWs.send("jdev/sps/enablebinstatusupdate")
+                start = time.time()
+                ctrlStart = time.time()
+                writeStart = time.time()
+                keepAliveStart = time.time()
+                pingChange = time.time()
+                pingValue = True
+                while running:
+                    #Parse incomming messages
+                    msgHeader = await myWs.recv()
+                    try:
+                        header = lox.Header(msgHeader)
+                        logger.debug("Msg len {}".format(header.msg_len))
+                        if header.msg_len > 0:
+                            message = await myWs.recv()
+                        if header.msg_type == 'text':
+                            logger.debug("Text message: {}".format(message))
+                        elif header.msg_type == 'bin':
+                            logger.debug("Binary message: {}".format(message))
+                        elif header.msg_type == 'value':
+                            statesDict = lox.ValueState.parseTable(message)
+                            for uuid in statesDict:
+                                valueStore.setValue(uuid, float(statesDict[uuid]))
+                                if logger.isEnabledFor(logging.DEBUG):
+                                    nameLookup = nested_lookup(uuid, struct_dict, with_keys = True)
+                                    name = 'Unknown'
+                                    if uuid in nameLookup:
+                                      name = nameLookup[uuid][0]['name']
+                                    logger.debug("Value {}({}): {}".format(name,uuid, statesDict[uuid]))
+                        elif header.msg_type == 'text_event':
+                            if logger.isEnabledFor(logging.DEBUG):
+                                textsDict = lox.TextState.parseTable(message)
+                                logger.debug(textsDict)
+                                for uuid in textsDict:
+                                    nameLookup = nested_lookup(uuid, struct_dict, with_keys = True)
+                                    name = 'Unknown'
+                                    if uuid in nameLookup:
+                                        name = nameLookup[uuid][0]['name']
+                                    logger.debug("Text {}({}): {}".format(name,uuid, textsDict[uuid]))
+                        elif header.msg_type == 'daytimer':
+                            logger.debug("Daytimer message: {}".format(message))
+                        elif header.msg_type == 'out-of-service':
+                            logger.debug("Out-of-service message: {}".format(message))
+                        elif header.msg_type == 'still_alive':
+                            logger.debug("Still alive message")
+                        elif header.msg_type == 'weather':
+                            logger.debug("Weather message: {}".format(message))
+                        else:
+                            logger.error("Unknown message: {}".format(message))
+                    except ValueError:
+                        print("Received unexpected message")
+                        logger.error("This message was not a header as expected {}".format(msgHeader))
+                        
+                    #Writing data to DB
+                    if valueStore.hasNewData() and (time.time() - start) >= DB_REFRESH_TIME:
+                        #Logger has new data and DB_REFRESH_TIME has passed
+                        #valueStore.printData()
+                        loxoneData = valueStore.getDataWithNames()
+                        valueStore.flushData()
+                        if writeToDb:
+                            weatherData = weather.getData()
+                            loxoneData.update(weatherData)
+                            writeData = ctrlValStore.getDataWithNames()
+                            loxoneData.update(writeData)
+                            influxConnector.submitData(loxoneData)
+                        start = time.time()
+                        
+                    #Keep alive messages
+                    if (time.time() - keepAliveStart) >= KEEP_ALIVE_REFRESH_TIME:
+                        logger.debug("Sending keep alive")
+                        await myWs.send("keepalive")
+                        keepAliveStart = time.time()
+                        
+                    #Refresh the controller
+                    if (time.time() - ctrlStart) >= CONTROLLER_REFRESH_RATE:
+                        ctrlStart = time.time()
+                        #Create data for controller
+                        loxoneData = valueStore.getDataWithNames()
                         weatherData = weather.getData()
                         loxoneData.update(weatherData)
                         writeData = ctrlValStore.getDataWithNames()
                         loxoneData.update(writeData)
+                        ctrlData = myController.update(loxoneData)
+                        for item in ctrlData:
+                            ctrlValStore.setValueByName(item, ctrlData[item])
+                        #Write also weather data to ctrlValStore
+                        for item in weatherData:
+                            if item in weatherDataToLoxDict:
+                                ctrlValStore.setValueByName(weatherDataToLoxDict[item], weatherData[item])
+                    
+                    if (time.time() - pingChange) >= LOXONE_PING_VALUE_CHANGE:
+                        pingValue = not pingValue
+                        pingChange = time.time()
+                        ctrlValStore.setValueByName('LoxCtrlPing', 1 if pingValue else 0)
+                    
+                    #Writing data to Loxone
+                    if ctrlValStore.hasNewData() and (time.time() - writeStart) >= LOXONE_WRITE_TIME:
+                        #Time to write new data to Loxone
+                        #ctrlValStore.printData()
+                        writeData = ctrlValStore.getDataWithUuids(changedOnly=(not firstRun))
+                        firtsRun = False
+                        ctrlValStore.flushData()
+                        if writeToLox:
+                            #send commands to Loxone
+                            for cmd in writeData:
+                                setDataCommand = "jdev/sps/io/{}/{}".format(cmd, writeData[cmd])
+                                logger.debug("Sending data to {}: {}".format(cmd, setDataCommand))
+                                #Send message
+                                await myWs.send(setDataCommand)
+                        writeStart = time.time()
+                #Script is ending, write default values to db
+                if writeToDb:
+                    for item in logValueNames:
+                        if item[1]:
+                            valueStore.setValueByName(item[0], item[2])
+                    if valueStore.hasNewData():
+                        loxoneData = valueStore.getDataWithNames()
+                        valueStore.flushData()
+                        weatherData = weather.getData()
+                        loxoneData.update(weatherData)
                         influxConnector.submitData(loxoneData)
-                    start = time.time()
-                    
-                #Keep alive messages
-                if (time.time() - keepAliveStart) >= KEEP_ALIVE_REFRESH_TIME:
-                    logger.debug("Sending keep alive")
-                    await myWs.send("keepalive")
-                    keepAliveStart = time.time()
-                    
-                #Refresh the controller
-                if (time.time() - ctrlStart) >= CONTROLLER_REFRESH_RATE:
-                    ctrlStart = time.time()
-                    #Create data for controller
-                    loxoneData = valueStore.getDataWithNames()
-                    weatherData = weather.getData()
-                    loxoneData.update(weatherData)
-                    writeData = ctrlValStore.getDataWithNames()
-                    loxoneData.update(writeData)
-                    ctrlData = myController.update(loxoneData)
-                    for item in ctrlData:
-                        ctrlValStore.setValueByName(item, ctrlData[item])
-                    #Write also weather data to ctrlValStore
-                    for item in weatherData:
-                        if item in weatherDataToLoxDict:
-                            ctrlValStore.setValueByName(weatherDataToLoxDict[item], weatherData[item])
-                    
-                #Writing data to Loxone
-                if ctrlValStore.hasNewData() and (time.time() - writeStart) >= LOXONE_WRITE_TIME:
-                    #Time to write new data to Loxone
-                    #ctrlValStore.printData()
-                    writeData = ctrlValStore.getDataWithUuids(changedOnly=(not firstRun))
-                    firtsRun = False
-                    ctrlValStore.flushData()
-                    if writeToLox:
-                        #send commands to Loxone
-                        for cmd in writeData:
-                            setDataCommand = "jdev/sps/io/{}/{}".format(cmd, writeData[cmd])
-                            logger.debug("Sending data to {}: {}".format(cmd, setDataCommand))
-                            #Send message
-                            await myWs.send(setDataCommand)
-                            await myWs.recv()
-                            logger.debug("Answer to the command: {}".format(await myWs.recv()))
-                    writeStart = time.time()
-            #Script is ending, write default values to db
-            if writeToDb:
-                for item in logValueNames:
-                    if item[1]:
-                        valueStore.setValueByName(item[0], item[2])
-                if valueStore.hasNewData():
-                    loxoneData = valueStore.getDataWithNames()
-                    valueStore.flushData()
-                    weatherData = weather.getData()
-                    loxoneData.update(weatherData)
-                    influxConnector.submitData(loxoneData)
-        except websockets.ConnectionClosed:
-            logger.info('Connection closed')
-            pass
+            except websockets.ConnectionClosed:
+                logger.info('Connection closed')
+                pass
+    except websockets.InvalidStatusCode as e:
+        logger.info('Connection error: Invalid status code: {}'.format(e))
 
 
 # Function to RSA encrypt the AES key and iv
